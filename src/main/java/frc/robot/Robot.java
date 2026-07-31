@@ -35,6 +35,7 @@ public class Robot extends TimedRobot {
   private static final int kRightFollowerCanId = 4;
   private static final int kFeederCanId = 5;
   private static final int kShooterCanId = 6;
+  private static final int kIntakeCanId = 7;
 
   // feeder 和 shooter 的电机方向。Clockwise/CounterClockwise 表示正输出时传感器方向。
   private static final InvertedValue kFeederInverted = InvertedValue.Clockwise_Positive;
@@ -44,6 +45,7 @@ public class Robot extends TimedRobot {
   // TODO: 装上真实机构和 game piece 后调节这两个目标转速。
   private static final double kFeederVelocityRps = 40.0;
   private static final double kShooterVelocityRps = 80.0;
+  private static final double kIntakeVelocityRps = 60.0;
 
   // feeder 的速度闭环参数。kS/kV 是前馈，kP/kI/kD 是 PID 反馈。
   // TODO: 确认传感器单位和方向后，重新调节 feeder 的前馈和 PID 参数。
@@ -61,6 +63,14 @@ public class Robot extends TimedRobot {
   private static final double kShooterKi = 0.0;
   private static final double kShooterKd = 0.0;
 
+  // intake 的速度闭环参数。
+  // TODO: 安装 intake 后，重新调节 intake 的前馈和 PID 参数。
+  private static final double kIntakeKs = 0.20;
+  private static final double kIntakeKv = 0.12;
+  private static final double kIntakeKp = 0.15;
+  private static final double kIntakeKi = 0.0;
+  private static final double kIntakeKd = 0.0;
+
   // 底盘电机对象。TalonSRX/VictorSPX 使用 Phoenix 5 的 WPI 封装，可以直接给 DifferentialDrive 用。
   private final WPI_TalonSRX m_leftMaster = new WPI_TalonSRX(kLeftMasterCanId);
   private final WPI_VictorSPX m_leftFollower = new WPI_VictorSPX(kLeftFollowerCanId);
@@ -70,10 +80,12 @@ public class Robot extends TimedRobot {
   // feeder 和 shooter 电机对象。这里用 Phoenix 6 的 TalonFX 控制速度闭环。
   private final TalonFX m_feeder = new TalonFX(kFeederCanId);
   private final TalonFX m_shooter = new TalonFX(kShooterCanId);
+  private final TalonFX m_intake = new TalonFX(kIntakeCanId);
 
   // Phoenix 6 控制请求对象：VelocityVoltage 表示速度闭环，NeutralOut 表示停止输出。
   private final VelocityVoltage m_feederVelocityRequest = new VelocityVoltage(0.0);
   private final VelocityVoltage m_shooterVelocityRequest = new VelocityVoltage(0.0);
+  private final VelocityVoltage m_intakeVelocityRequest = new VelocityVoltage(0.0);
   private final NeutralOut m_stopRequest = new NeutralOut();
 
   // DifferentialDrive 负责把 forward/rotation 转换成左右两侧底盘输出。
@@ -118,6 +130,19 @@ public class Robot extends TimedRobot {
     // 把上面创建的配置真正写入 TalonFX 控制器。
     m_feeder.getConfigurator().apply(feederConfig);
     m_shooter.getConfigurator().apply(shooterConfig);
+
+    // 创建 intake 的 TalonFX 配置。
+    TalonFXConfiguration intakeConfig = new TalonFXConfiguration();
+    intakeConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
+    intakeConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
+    intakeConfig.Slot0.kS = kIntakeKs;
+    intakeConfig.Slot0.kV = kIntakeKv;
+    intakeConfig.Slot0.kP = kIntakeKp;
+    intakeConfig.Slot0.kI = kIntakeKi;
+    intakeConfig.Slot0.kD = kIntakeKd;
+
+    // 把 intake 配置写入 TalonFX 控制器。
+    m_intake.getConfigurator().apply(intakeConfig);
 
     // 设置底盘 follower，让每侧副电机自动跟随同侧主电机。
     m_leftFollower.follow(m_leftMaster);
@@ -170,6 +195,13 @@ public class Robot extends TimedRobot {
       m_shooter.setControl(m_shooterVelocityRequest.withVelocity(kShooterVelocityRps));
     } else {
       m_shooter.setControl(m_stopRequest);
+    }
+
+    // 按住 X 键时 intake 按目标速度运行，松开 X 键时 intake 停止。
+    if (m_controller.getXButton()) {
+      m_intake.setControl(m_intakeVelocityRequest.withVelocity(kIntakeVelocityRps));
+    } else {
+      m_intake.setControl(m_stopRequest);
     }
   }
 
