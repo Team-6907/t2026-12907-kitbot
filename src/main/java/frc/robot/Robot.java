@@ -15,6 +15,7 @@ import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.signals.InvertedValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
 import edu.wpi.first.wpilibj.TimedRobot;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.XboxController;
 import edu.wpi.first.wpilibj.drive.DifferentialDrive;
 
@@ -50,6 +51,65 @@ public class Robot extends TimedRobot {
   private static final double kShooterTowerVelocityRps = 20.0;
   private static final double kIntakeShooterVelocityRps = 10.0;  //TODO: Tune
   private static final double kIntakeFeederVelocityRps = -10.0;  //TODO: Tune
+
+  // 教学自动全程开环：输出是 [-1, 1] 的比例，不是 m/s，也不读取距离或航向反馈。
+  private static final double kAutoDriveOutput = 0.35;
+  private static final double kAutoTurnOutput = 0.30;
+  private static final double kAutoArcOuterOutput = 0.35;
+
+  // TODO: 以下移动时长只是未标定的初始估计，不能保证达到名称中的距离或角度。
+  // 调整输出后必须重新标定时长；地面、电池电压、负载和轮胎打滑也会改变结果。
+  // 各段初值合计 18.1 s，不含周期切换误差；标定后需重新核对自动阶段时间预算。
+  private static final double kAutoDrive2MetersSeconds = 1.4;
+  private static final double kAutoTurnCcw90Seconds = 0.6;
+  private static final double kAutoDrive4MetersSeconds = 2.8;
+  private static final double kAutoTurnCw180Seconds = 1.2;
+  private static final double kAutoArcCw90Seconds = 3.2;
+  private static final double kAutoTurnCw135Seconds = 0.9;
+  private static final double kAutoWaitAtASeconds = 3.0;
+  private static final double kAutoShootSeconds = 5.0;
+
+  // 圆弧半径以底盘中心为参考；24.75 in 换算为 0.62865 m。
+  private static final double kAutoTrackWidthMeters = 24.75 * 0.0254;
+  private static final double kAutoArcRadiusMeters = 3.0;
+  // 顺时针前进时左轮在外侧。理想轮速比约 0.8103；输出比仍需实车标定。
+  private static final double kAutoArcInnerToOuterRatio =
+      (kAutoArcRadiusMeters - kAutoTrackWidthMeters / 2.0)
+          / (kAutoArcRadiusMeters + kAutoTrackWidthMeters / 2.0);
+  private static final double kAutoArcInnerOutput =
+      kAutoArcOuterOutput * kAutoArcInnerToOuterRatio;
+
+  // 蓝方固定坐标：+X 离开蓝方联盟墙，+Y 为蓝方驾驶站视角的左侧，逆时针为正。
+  // 下面的位置均为相对起点的理想位移，不是测得的场地位置。
+  private enum AutoStep {
+    DRIVE_FORWARD_2M(kAutoDrive2MetersSeconds, kAutoDriveOutput, kAutoDriveOutput, false),
+    TURN_CCW_90(kAutoTurnCcw90Seconds, -kAutoTurnOutput, kAutoTurnOutput, false),
+    DRIVE_POSITIVE_Y_4M(kAutoDrive4MetersSeconds, kAutoDriveOutput, kAutoDriveOutput, false),
+    // A = (2, 4)，理想航向 90°。
+    WAIT_AT_A(kAutoWaitAtASeconds, 0.0, 0.0, false),
+    TURN_CW_180(kAutoTurnCw180Seconds, kAutoTurnOutput, -kAutoTurnOutput, false),
+    // 从 A 朝 -Y 前进并顺时针走四分之一圆：到 (-1, 1)，理想航向 -180°。
+    // 终点比起点更靠近蓝方联盟墙 1 m；摆放起点时需留出车身及路径的边界余量。
+    ARC_CW_90(kAutoArcCw90Seconds, kAutoArcOuterOutput, kAutoArcInnerOutput, false),
+    TURN_CW_135(kAutoTurnCw135Seconds, kAutoTurnOutput, -kAutoTurnOutput, false),
+    // -180° - 135° = -315°，等价于 45°。射球时底盘停止。
+    SHOOT(kAutoShootSeconds, 0.0, 0.0, true),
+    DONE(0.0, 0.0, 0.0, false);
+
+    final double durationSeconds;
+    final double leftOutput;
+    final double rightOutput;
+    final boolean shoot;
+
+    AutoStep(double durationSeconds, double leftOutput, double rightOutput, boolean shoot) {
+      this.durationSeconds = durationSeconds;
+      this.leftOutput = leftOutput;
+      this.rightOutput = rightOutput;
+      this.shoot = shoot;
+    }
+  }
+
+  private static final AutoStep[] kAutoSequence = AutoStep.values();
 
   // feeder 的速度闭环参数。kS/kV 是前馈，kP/kI/kD 是 PID 反馈。
   // TODO: 确认传感器单位和方向后，重新调节 feeder 的前馈和 PID 参数。
@@ -87,6 +147,12 @@ public class Robot extends TimedRobot {
 
   // XboxController 负责读取手柄摇杆和按键。
   private final XboxController m_controller = new XboxController(kControllerPort);
+
+  private final Timer m_autoStepTimer = new Timer();
+  private AutoStep m_autoStep = AutoStep.DONE;
+  // 自动射球沿用遥控 A 按钮的电压，复用请求，避免在周期循环中创建对象。
+  private final VoltageOut m_autoShooterRequest = new VoltageOut(kLaunchShooterVoltage);
+  private final VoltageOut m_autoFeederRequest = new VoltageOut(kLaunchFeederVoltage);
 
   /**
    * This function is run when the robot is first started up and should be used for any
@@ -144,13 +210,53 @@ public class Robot extends TimedRobot {
   public void robotPeriodic() {}
 
   @Override
-  public void autonomousInit() {}
+  public void autonomousInit() {
+    stopAutonomous();
+    // 保持圆弧左右输出比例；退出自动时恢复默认死区，不影响遥控手感。
+    m_drive.setDeadband(0.0);
+    m_autoStep = AutoStep.DRIVE_FORWARD_2M;
+    m_autoStepTimer.restart();
+  }
 
   @Override
-  public void autonomousPeriodic() {}
+  public void autonomousPeriodic() {
+    if (m_autoStep != AutoStep.DONE
+        && m_autoStepTimer.hasElapsed(m_autoStep.durationSeconds)) {
+      m_autoStep = kAutoSequence[m_autoStep.ordinal() + 1];
+      // 每段从真正切换输出的时刻重新计时，不补跑或跳过因循环延迟错过的动作。
+      m_autoStepTimer.restart();
+    }
+
+    if (m_autoStep == AutoStep.DONE) {
+      stopAutonomous();
+      return;
+    }
+
+    // 每周期更新输出以喂 MotorSafety；false 关闭输入平方，保留圆弧输出比例。
+    // 左负右正为逆时针原地转，左正右负为顺时针原地转。
+    m_drive.tankDrive(m_autoStep.leftOutput, m_autoStep.rightOutput, false);
+    if (m_autoStep.shoot) {
+      m_shooter.setControl(m_autoShooterRequest);
+      m_feeder.setControl(m_autoFeederRequest);
+    } else {
+      m_shooter.setControl(m_stopRequest);
+      m_feeder.setControl(m_stopRequest);
+    }
+  }
+
+  private void stopAutonomous() {
+    m_autoStep = AutoStep.DONE;
+    m_autoStepTimer.stop();
+    m_drive.stopMotor();
+    m_drive.setDeadband(DifferentialDrive.kDefaultDeadband);
+    m_shooter.setControl(m_stopRequest);
+    m_feeder.setControl(m_stopRequest);
+  }
 
   @Override
-  public void teleopInit() {}
+  public void teleopInit() {
+    stopAutonomous();
+  }
 
   @Override
   public void teleopPeriodic() {
@@ -179,13 +285,17 @@ public class Robot extends TimedRobot {
   }
 
   @Override
-  public void disabledInit() {}
+  public void disabledInit() {
+    stopAutonomous();
+  }
 
   @Override
   public void disabledPeriodic() {}
 
   @Override
-  public void testInit() {}
+  public void testInit() {
+    stopAutonomous();
+  }
 
   @Override
   public void testPeriodic() {}
