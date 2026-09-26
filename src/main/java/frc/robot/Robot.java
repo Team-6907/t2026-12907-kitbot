@@ -42,6 +42,10 @@ public class Robot extends TimedRobot {
   private static final InvertedValue kShooterInverted = InvertedValue.Clockwise_Positive;
 
   // feeder, shooter 和 intake 按键触发时的目标速度，单位是 rotations per second。
+  private static final double kLaunchShooterVoltage = 11.0;  //TODO: Tune
+  private static final double kLaunchFeederVoltage = 9.0;  //TODO: Tune
+  private static final double kLaunchShooterVelocityRps = 50.0;  //TODO: Tune
+  private static final double kLaunchFeederVelocityRps = 30.0;  //TODO: Tune
   private static final double kFeederVelocityRps = 40.0;
   private static final double kShooterTowerVelocityRps = 20.0;
   private static final double kIntakeShooterVelocityRps = 10.0;  //TODO: Tune
@@ -165,16 +169,8 @@ public class Robot extends TimedRobot {
       m_feeder.setControl(m_feederVelocityRequest.withVelocity(kIntakeFeederVelocityRps));
     }
     else if (m_controller.getAButton()) {
-      m_shooter.setControl(new VoltageOut(11));
-      m_feeder.setControl(new VoltageOut(9));
-    }
-    else if (m_controller.getYButton()) {
-      m_shooter.setControl(new VoltageOut(7));
-      m_feeder.setControl(new VoltageOut(6));
-    }
-    else if (m_controller.getBButton()) {
-      m_feeder.setControl(m_feederVelocityRequest.withVelocity(kFeederVelocityRps));
-      m_shooter.setControl(m_stopRequest);
+      m_shooter.setControl(new VoltageOut(kLaunchShooterVoltage));
+      m_feeder.setControl(new VoltageOut(kLaunchFeederVoltage));
     }
     else {
       m_shooter.setControl(m_stopRequest);
